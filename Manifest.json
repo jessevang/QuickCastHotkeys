@@ -1,8 +1,8 @@
 {
   "Name": "QuickCastHotkeys",
   "Author": "Darkmushu",
-  "Version": "1.0.0",
-  "Description": "Use a hotkey to use item or tool on slot 1, then automatically sets tool index back to your previous tool index.",
+  "Version": "1.0.2",
+  "Description": "Lets you press a hotkey to temporarily switch to a specific tool or item (like the one in slot 1 or 2), use it, and then automatically switch back to what you were holding before",
   "UniqueID": "Darkmushu.QuickCastHotkeys",
   "EntryDll": "QuickCastHotkeys.dll",
   "MinimumApiVersion": "4.0.0",

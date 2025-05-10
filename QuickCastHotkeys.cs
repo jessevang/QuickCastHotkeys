@@ -1,247 +1,190 @@
 ﻿using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
-using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Input;
 using System.Runtime.InteropServices;
-
+using System;
+using System.Linq;
+using GenericModConfigMenu;
 
 namespace QuickCastHotkeys
 {
     public class Config
     {
-        public string Notes1 = "The hotkeys don't prevent keyboard hotkeys function from executing in game so best to use a hotkey that is not currently used";
-        public Keys Slot1HotkeyKeyboard { get; set; } = Keys.Space;
-        public Keys Slot2HotkeyKeyboard { get; set; } = Keys.V;
-        public string HereIsAListOfSomeOptionsForControllers = "A,B,X,Y,Back,Start,DPadUp,DpadDown,DPadRight,LeftShoulder,RightShoulder,LeftTrigger,RightTrigger,LeftStick,RightStick,BigButton";
-        public string Notes3 = "The hotkeys don't prevent keyboard hotkeys function from executing in game so best to use a hotkey that is not currently used";
-        public Buttons Slot1HotkeyController { get; set; } = Buttons.LeftStick;
-        public Buttons Slot2HotkeyController { get; set; } = Buttons.DPadDown;
+        public string Notes0 = "Each hotkey applies to a tool slot (1-based).";
+        public int[] HotkeyToolIndexes { get; set; } = Enumerable.Range(1, 10).ToArray();
 
-
+        public SButton[] Hotkeys { get; set; } = new SButton[]
+        {
+            SButton.Space, SButton.V,
+            SButton.None, SButton.None, SButton.None,
+            SButton.None, SButton.None, SButton.None,
+            SButton.None, SButton.None
+        };
     }
 
     internal sealed class ModEntry : Mod
     {
-
         [DllImport("user32.dll")]
         private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-        private bool IsHotkey0Held = false;
-        private bool IsHotkey1Held = false;
-        private bool NeedToSwitchBackHotkey0 = false;
-        private bool NeedToSwitchBackHotkey1 = false;
+
+        private bool[] IsHotkeyHeld = new bool[10];
+        private bool[] NeedToSwitchBack = new bool[10];
         private bool isUsingTool = false;
-        private int originalToolIndex = 2;
-        public Config Config { get; private set; }=null;
+        private int originalToolIndex = 0;
+
+        public Config Config { get; private set; }
         public static ModEntry Instance { get; private set; }
-
-
 
         public override void Entry(IModHelper helper)
         {
             Instance = this;
             Config = helper.ReadConfig<Config>() ?? new Config();
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
-
-
+            helper.Events.GameLoop.GameLaunched += OnGameLaunched;
         }
-
-
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
-
-            // Only run this logic for the local player
             if (!Context.IsWorldReady || !Game1.player.IsLocalPlayer)
                 return;
 
             AppliesSmartCast();
-            checkifdoneusingtool();
-
+            CheckIfDoneUsingTool();
         }
-
 
         private void AppliesSmartCast()
         {
+            //Do nothing if player is in a menu like Generic Mod Config Menu
+            if (Game1.activeClickableMenu != null)
+                return;
 
 
-            GamePadState gamePadState = GamePad.GetState(PlayerIndex.One);
-            KeyboardState keyBoardState = Keyboard.GetState();
-            MouseState mouseState = Mouse.GetState();
-
-            bool isHotkey0Pressed = gamePadState.IsButtonDown(Config.Slot1HotkeyController) || keyBoardState.IsKeyDown(Config.Slot1HotkeyKeyboard);
-            bool isHotkey1Pressed = gamePadState.IsButtonDown(Config.Slot2HotkeyController) || keyBoardState.IsKeyDown(Config.Slot2HotkeyKeyboard);
             Farmer player = Game1.player;
 
-
-            //makes it so only 1 hotkey is being executed at a time
-            if (NeedToSwitchBackHotkey0)
+            for (int i = 0; i < 10; i++)
             {
-                isHotkey1Pressed= false;
-            }
-            else if (NeedToSwitchBackHotkey1)
-            {
-                isHotkey0Pressed= false;
-            }
+                if (Config.Hotkeys[i] == SButton.None)
+                    continue;
 
-    
-            if (isHotkey0Pressed && !IsHotkey0Held)
-            {
+                bool isHotkeyPressed = Helper.Input.IsDown(Config.Hotkeys[i]);
 
-                if (!isUsingTool) 
+                // Prevent multiple hotkeys at once
+                for (int j = 0; j < 10; j++)
                 {
+                    if (i != j && NeedToSwitchBack[j])
+                    {
+                        isHotkeyPressed = false;
+                        break;
+                    }
+                }
 
+                // Hotkey just pressed
+                if (isHotkeyPressed && !IsHotkeyHeld[i])
+                {
+                    if (!isUsingTool)
+                    {
+                        isUsingTool = true;
 
+                        if (!NeedToSwitchBack[i])
+                        {
+                            originalToolIndex = player.CurrentToolIndex;
+                            player.CurrentToolIndex = Config.HotkeyToolIndexes[i] - 1;
+                        }
 
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                        NeedToSwitchBack[i] = true;
 
-                    if (!NeedToSwitchBackHotkey0) {
-                        originalToolIndex = player.CurrentToolIndex;
-                        player.CurrentToolIndex = 0;
+                        Item currentItem = player.Items[player.CurrentToolIndex];
+                        if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
+                        {
+                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                        }
                     }
 
+                    IsHotkeyHeld[i] = true;
+                }
 
-                    // Press Left Mouse Button
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    NeedToSwitchBackHotkey0 = true;
+                // Hotkey just released
+                if (!isHotkeyPressed && IsHotkeyHeld[i])
+                {
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
 
-
-
-                    // Assuming player.Items is a list of the player's items (tools, etc.)
-                    Item currentItem = Game1.player.Items[Game1.player.CurrentToolIndex];
+                    Item currentItem = player.Items[player.CurrentToolIndex];
                     if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
                     {
-                        // Simulate a right-click (mouse down and then mouse up)
-                        mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0); // Right mouse button down
-
-
+                        mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                     }
 
-
-
-
-
-
+                    IsHotkeyHeld[i] = false;
                 }
-
-                IsHotkey0Held = true;
-
-
-
-
             }
-            
-
-            if (!isHotkey0Pressed && IsHotkey0Held)
-            {
-                // Release Left Mouse Button if hotkey no longer pressed
-
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                Item currentItem = Game1.player.Items[Game1.player.CurrentToolIndex];
-                if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
-                {
-                    // Simulate a right-click (mouse down and then mouse up)
-                    mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0); // Right mouse button down
-
-
-                }
-
-                IsHotkey0Held = false;
-
-            }
-
-
-            if (isHotkey1Pressed && !IsHotkey1Held)
-            {
-
-                if (!isUsingTool)
-                {
-
-
-
-
-                    if (!NeedToSwitchBackHotkey1)
-                    {
-                        originalToolIndex = player.CurrentToolIndex;
-                        player.CurrentToolIndex = 1;
-                    }
-
-
-                    // Press Left Mouse Button
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    NeedToSwitchBackHotkey1 = true;
-
-                    // Assuming player.Items is a list of the player's items (tools, etc.)
-                    Item currentItem = Game1.player.Items[Game1.player.CurrentToolIndex];
-                    if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
-                    {
-                        // Simulate a right-click (mouse down and then mouse up)
-                        mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0); // Right mouse button down
-
-
-                    }
-
-
-
-                }
-
-                IsHotkey1Held = true;
-
-
-
-
-            }
-
-            if (!isHotkey1Pressed && IsHotkey1Held)
-            {
-                // Release Left Mouse Button if hotkey no longer pressed
-
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                Item currentItem = Game1.player.Items[Game1.player.CurrentToolIndex];
-                if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
-                {
-                    // Simulate a right-click (mouse down and then mouse up)
-                    mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0); // Right mouse button down
-
-
-                }
-                IsHotkey1Held = false;
-
-            }
-
-
-
-
         }
 
-        private void checkifdoneusingtool()
+        private void CheckIfDoneUsingTool()
         {
-            if (!Game1.player.UsingTool && !IsHotkey0Held)
+            if (!Game1.player.UsingTool)
             {
                 isUsingTool = false;
-                if (NeedToSwitchBackHotkey0)
+
+                for (int i = 0; i < 10; i++)
                 {
-                    Game1.player.CurrentToolIndex = originalToolIndex;
-                    NeedToSwitchBackHotkey0 = false;
-                }
-            }
-            if (!Game1.player.UsingTool && !IsHotkey1Held)
-            {
-                isUsingTool = false;
-                if (NeedToSwitchBackHotkey1)
-                {
-                    Game1.player.CurrentToolIndex = originalToolIndex;
-                    NeedToSwitchBackHotkey1 = false;
+                    if (!IsHotkeyHeld[i] && NeedToSwitchBack[i])
+                    {
+                        Game1.player.CurrentToolIndex = originalToolIndex;
+                        NeedToSwitchBack[i] = false;
+                    }
                 }
             }
         }
 
+        private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
+        {
+            SetupGMCM();
+        }
 
+        private void SetupGMCM()
+        {
+            var gmcm = Helper.ModRegistry.GetApi<IGenericModConfigMenuApi>("spacechase0.GenericModConfigMenu");
+            if (gmcm == null)
+            {
+                Monitor.Log("GMCM not found. Skipping config menu setup.", LogLevel.Warn);
+                return;
+            }
 
+            gmcm.Register(
+                mod: ModManifest,
+                reset: () => Config = new Config(),
+                save: () => Helper.WriteConfig(Config)
+            );
 
+            for (int i = 0; i < 10; i++)
+            {
+                int index = i;
 
+                gmcm.AddKeybind(
+                    mod: ModManifest,
+                    name: () => $"Hotkey {index + 1}",
+                    tooltip: () => "Press this to trigger the tool slot below.",
+                    getValue: () => Config.Hotkeys[index],
+                    setValue: value => Config.Hotkeys[index] = value
+                );
+
+                gmcm.AddNumberOption(
+                    mod: ModManifest,
+                    name: () => $"Tool Slot for Hotkey {index + 1}",
+                    tooltip: () => "Which tool slot (1–12) this hotkey activates.",
+                    getValue: () => Config.HotkeyToolIndexes[index],
+                    setValue: value => Config.HotkeyToolIndexes[index] = value,
+                    min: 1,
+                    max: 12
+                );
+            }
+        }
     }
 }
