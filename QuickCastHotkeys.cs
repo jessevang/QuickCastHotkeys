@@ -1,5 +1,6 @@
 ﻿using StardewModdingAPI;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Utilities;
 using StardewValley;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Input;
@@ -15,12 +16,12 @@ namespace QuickCastHotkeys
         public string Notes0 = "Each hotkey applies to a tool slot (1-based).";
         public int[] HotkeyToolIndexes { get; set; } = Enumerable.Range(1, 10).ToArray();
 
-        public SButton[] Hotkeys { get; set; } = new SButton[]
+        public KeybindList[] Hotkeys { get; set; } = new KeybindList[]
         {
-            SButton.Space, SButton.V,
-            SButton.None, SButton.None, SButton.None,
-            SButton.None, SButton.None, SButton.None,
-            SButton.None, SButton.None
+            new(SButton.Space), new(SButton.V),
+            new(), new(), new(),
+            new(), new(), new(),
+            new(), new()
         };
     }
 
@@ -60,19 +61,18 @@ namespace QuickCastHotkeys
 
         private void AppliesSmartCast()
         {
-            //Do nothing if player is in a menu like Generic Mod Config Menu
+            // Do nothing if player is in a menu like Generic Mod Config Menu
             if (Game1.activeClickableMenu != null)
                 return;
-
 
             Farmer player = Game1.player;
 
             for (int i = 0; i < 10; i++)
             {
-                if (Config.Hotkeys[i] == SButton.None)
+                if (Config.Hotkeys[i] == null || Config.Hotkeys[i].Keybinds.Count() == 0)
                     continue;
 
-                bool isHotkeyPressed = Helper.Input.IsDown(Config.Hotkeys[i]);
+                bool isHotkeyPressed = Config.Hotkeys[i].IsDown();
 
                 // Prevent multiple hotkeys at once
                 for (int j = 0; j < 10; j++)
@@ -167,10 +167,10 @@ namespace QuickCastHotkeys
             {
                 int index = i;
 
-                gmcm.AddKeybind(
+                gmcm.AddKeybindList(
                     mod: ModManifest,
                     name: () => $"Hotkey {index + 1}",
-                    tooltip: () => "Press this to trigger the tool slot below.",
+                    tooltip: () => "Press this to trigger the tool slot below. Supports Shift/Ctrl combos.",
                     getValue: () => Config.Hotkeys[index],
                     setValue: value => Config.Hotkeys[index] = value
                 );
