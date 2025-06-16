@@ -10,6 +10,16 @@
   <ItemGroup>
     <PackageReference Include="Lib.Harmony" Version="2.3.5" />
     <PackageReference Include="Pathoschild.Stardew.ModBuildConfig" Version="4.3.2" />
+    
+    <!-- Include the xdotool executable -->
+    <None Include="xdotool">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+
+    <!-- Include the license file -->
+    <None Include="LICENSE.xdotool.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
