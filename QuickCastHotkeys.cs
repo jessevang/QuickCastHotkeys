@@ -6,63 +6,135 @@ using Microsoft.Xna.Framework.Input;
 using System;
 using System.Linq;
 using GenericModConfigMenu;
-using Microsoft.Xna.Framework;
 using HarmonyLib;
-using System.Runtime.InteropServices;
-using System.Diagnostics;
 
 namespace QuickCastHotkeys
 {
     public class Config
     {
         public string Notes0 = "Each hotkey applies to a tool slot (1-based).";
-        public int[] HotkeyToolIndexes { get; set; } = Enumerable.Range(1, 12).ToArray();
-        public SmartCastMode Mode { get; set; } = SmartCastMode.Windows;
-        public bool DebugMode { get; set; } = false;
+        public int[] HotkeyToolIndexes { get; set; } = Enumerable.Range(1, 10).ToArray();
+
         public KeybindList[] Hotkeys { get; set; } = new KeybindList[]
         {
-        new(SButton.Space), new(SButton.V),
-        new(), new(), new(),
-        new(), new(), new(),
-        new(), new(), new(), new()
+            new(SButton.Space), new(SButton.V),
+            new(), new(), new(),
+            new(), new(), new(),
+            new(), new()
         };
+
+        public bool EnableDebugLogging { get; set; } = false;
     }
 
-
-    public enum SmartCastMode
+    internal sealed class ModEntry : Mod
     {
-        Windows,
-        Linux
-    }
+        private const int HotkeyCount = 10;
 
-
-    public class ModEntry : Mod
-    {
-        [DllImport("user32.dll")]
-        private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-        private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-        private const uint MOUSEEVENTF_LEFTUP = 0x0004;
-        public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-        public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-
-
-        private bool[] IsHotkeyHeld = new bool[12];
-        private bool[] NeedToSwitchBack = new bool[12];
+        private readonly bool[] IsHotkeyHeld = new bool[HotkeyCount];
+        private readonly bool[] NeedToSwitchBack = new bool[HotkeyCount];
         private bool isUsingTool = false;
         private int originalToolIndex = 0;
-        public static bool[] HotkeyHeld = new bool[12];
-        public static bool IsHotkeyActive = false;
+
+        private Harmony harmony = null!;
+
+        public Config Config { get; private set; } = null!;
+        public static ModEntry Instance { get; private set; } = null!;
 
 
-        public Config Config { get; private set; }
-        public static ModEntry Instance { get; private set; }
+        internal static bool ForceLeftHeld;
+        internal static bool ForceRightHeld;
+        internal static bool ForceLeftPressFrame;
+        internal static bool ForceLeftReleaseFrame;
+        internal static bool ForceRightPressFrame;
+        internal static bool ForceRightReleaseFrame;
 
         public override void Entry(IModHelper helper)
         {
             Instance = this;
             Config = helper.ReadConfig<Config>() ?? new Config();
+
+            harmony = new Harmony(ModManifest.UniqueID);
+            harmony.Patch(
+                original: AccessTools.Method(typeof(InputState), nameof(InputState.GetMouseState)),
+                postfix: new HarmonyMethod(typeof(ModEntry), nameof(After_GetMouseState))
+            );
+
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
+            helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
+
+            LogDebug("QuickCastHotkeys loaded. Patched InputState.GetMouseState.");
+        }
+
+        public static void After_GetMouseState(ref MouseState __result)
+        {
+            if (Instance == null)
+                return;
+
+            if (!Context.IsWorldReady || Game1.player == null || !Game1.player.IsLocalPlayer)
+                return;
+
+            if (Game1.activeClickableMenu != null && Game1.activeClickableMenu is not StardewValley.Menus.BobberBar)
+                return;
+
+            ButtonState left = __result.LeftButton;
+            ButtonState right = __result.RightButton;
+            bool changed = false;
+
+            if (ForceLeftPressFrame)
+            {
+                left = ButtonState.Pressed;
+                changed = true;
+            }
+            else if (ForceLeftHeld)
+            {
+                left = ButtonState.Pressed;
+                changed = true;
+            }
+            else if (ForceLeftReleaseFrame)
+            {
+                left = ButtonState.Released;
+                changed = true;
+            }
+
+            if (ForceRightPressFrame)
+            {
+                right = ButtonState.Pressed;
+                changed = true;
+            }
+            else if (ForceRightHeld)
+            {
+                right = ButtonState.Pressed;
+                changed = true;
+            }
+            else if (ForceRightReleaseFrame)
+            {
+                right = ButtonState.Released;
+                changed = true;
+            }
+
+            if (!changed)
+                return;
+
+            __result = new MouseState(
+                __result.X,
+                __result.Y,
+                __result.ScrollWheelValue,
+                left,
+                __result.MiddleButton,
+                right,
+                __result.XButton1,
+                __result.XButton2
+            );
+
+            Instance.LogDebug(
+                $"After_GetMouseState -> Left={left}, Right={right}, " +
+                $"ForceLeftHeld={ForceLeftHeld}, ForceRightHeld={ForceRightHeld}, " +
+                $"ForceLeftPressFrame={ForceLeftPressFrame}, ForceLeftReleaseFrame={ForceLeftReleaseFrame}, " +
+                $"ForceRightPressFrame={ForceRightPressFrame}, ForceRightReleaseFrame={ForceRightReleaseFrame}, " +
+                $"Tool={Game1.player.CurrentTool?.Name ?? "null"}, UsingTool={Game1.player.UsingTool}, " +
+                $"Menu={Game1.activeClickableMenu?.GetType().FullName ?? "null"}"
+            );
         }
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
@@ -70,37 +142,67 @@ namespace QuickCastHotkeys
             if (!Context.IsWorldReady || !Game1.player.IsLocalPlayer)
                 return;
 
-            for (int i = 0; i < 12; i++)
-                HotkeyHeld[i] = Config.Hotkeys[i]?.IsDown() ?? false;
-
-            IsHotkeyActive = HotkeyHeld.Any(x => x);
-
-            if (Config.Mode == SmartCastMode.Windows)
-                AppliesSmartCastWindows();
-            else
-                AppliesSmartCastLinux();
-
-
+            AppliesSmartCast();
             CheckIfDoneUsingTool();
+
+            if (ForceLeftHeld || ForceRightHeld || ForceLeftPressFrame || ForceLeftReleaseFrame || ForceRightPressFrame || ForceRightReleaseFrame)
+            {
+                LogDebug(
+                    $"Tick {e.Ticks}: " +
+                    $"ForceLeftHeld={ForceLeftHeld}, ForceRightHeld={ForceRightHeld}, " +
+                    $"ForceLeftPressFrame={ForceLeftPressFrame}, ForceLeftReleaseFrame={ForceLeftReleaseFrame}, " +
+                    $"ForceRightPressFrame={ForceRightPressFrame}, ForceRightReleaseFrame={ForceRightReleaseFrame}, " +
+                    $"CurrentToolIndex={Game1.player.CurrentToolIndex}, Tool={Game1.player.CurrentTool?.Name ?? "null"}, " +
+                    $"UsingTool={Game1.player.UsingTool}, CanMove={Game1.player.CanMove}, " +
+                    $"Menu={Game1.activeClickableMenu?.GetType().FullName ?? "null"}"
+                );
+            }
+
+
+            if (ForceLeftPressFrame || ForceLeftReleaseFrame || ForceRightPressFrame || ForceRightReleaseFrame)
+            {
+                LogDebug($"Clearing frame pulse flags on tick {e.Ticks}.");
+                ForceLeftPressFrame = false;
+                ForceLeftReleaseFrame = false;
+                ForceRightPressFrame = false;
+                ForceRightReleaseFrame = false;
+            }
         }
 
-        private void AppliesSmartCastWindows()
+        private void AppliesSmartCast()
         {
-            // Do nothing if player is in a menu like Generic Mod Config Menu
-            if (Game1.activeClickableMenu != null)
+
+            if (Game1.activeClickableMenu != null && Game1.activeClickableMenu is not StardewValley.Menus.BobberBar)
+            {
+                LogDebug($"AppliesSmartCast blocked by menu: {Game1.activeClickableMenu.GetType().FullName}");
                 return;
+            }
 
             Farmer player = Game1.player;
 
-            for (int i = 0; i < 12; i++)
+            LogDebug(
+                $"AppliesSmartCast: activeClickableMenu={(Game1.activeClickableMenu != null)}, " +
+                $"currentMinigame={(Game1.currentMinigame != null)}, " +
+                $"UsingTool={Game1.player.UsingTool}, isUsingTool={isUsingTool}, " +
+                $"CurrentTool={Game1.player.CurrentTool?.Name ?? "null"}"
+            );
+
+            for (int i = 0; i < HotkeyCount; i++)
             {
                 if (Config.Hotkeys[i] == null || Config.Hotkeys[i].Keybinds.Count() == 0)
                     continue;
 
                 bool isHotkeyPressed = Config.Hotkeys[i].IsDown();
 
-                // Prevent multiple hotkeys at once
-                for (int j = 0; j < 12; j++)
+                LogDebug(
+                    $"Hotkey {i + 1} state: isDown={isHotkeyPressed}, " +
+                    $"IsHotkeyHeld={IsHotkeyHeld[i]}, NeedToSwitchBack={NeedToSwitchBack[i]}, " +
+                    $"playerUsingTool={Game1.player.UsingTool}, modIsUsingTool={isUsingTool}, " +
+                    $"currentMinigame={(Game1.currentMinigame != null)}, " +
+                    $"menu={Game1.activeClickableMenu?.GetType().FullName ?? "null"}"
+                );
+
+                for (int j = 0; j < HotkeyCount; j++)
                 {
                     if (i != j && NeedToSwitchBack[j])
                     {
@@ -109,169 +211,147 @@ namespace QuickCastHotkeys
                     }
                 }
 
-                // Hotkey just pressed
+
                 if (isHotkeyPressed && !IsHotkeyHeld[i])
                 {
-                    if (!isUsingTool)
-                    {
-                        isUsingTool = true;
+                    bool allowWhileFishing =
+                        Game1.activeClickableMenu is StardewValley.Menus.BobberBar
+                        || player.CurrentTool is StardewValley.Tools.FishingRod;
 
-                        if (!NeedToSwitchBack[i])
+                    if (!isUsingTool || allowWhileFishing)
+                    {
+
+                        if (!isUsingTool)
                         {
-                            originalToolIndex = player.CurrentToolIndex;
-                            player.CurrentToolIndex = Config.HotkeyToolIndexes[i] - 1;
+                            isUsingTool = true;
+
+                            if (!NeedToSwitchBack[i])
+                            {
+                                originalToolIndex = player.CurrentToolIndex;
+                                player.CurrentToolIndex = Config.HotkeyToolIndexes[i] - 1;
+                            }
+
+                            NeedToSwitchBack[i] = true;
                         }
 
-                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                        NeedToSwitchBack[i] = true;
+                        BeginForcedLeftClick();
 
                         Item currentItem = player.Items[player.CurrentToolIndex];
+                        LogDebug(
+                            $"Hotkey {i + 1} pressed. allowWhileFishing={allowWhileFishing}. " +
+                            $"Switched from slot {originalToolIndex + 1} to slot {player.CurrentToolIndex + 1}. " +
+                            $"Tool={player.CurrentTool?.Name ?? "null"} Item={currentItem?.Name ?? "null"} " +
+                            $"UsingTool={player.UsingTool} isUsingTool={isUsingTool}"
+                        );
+
                         if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
                         {
-                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                            BeginForcedRightClick();
                         }
+                    }
+                    else
+                    {
+                        LogDebug(
+                            $"Hotkey {i + 1} press ignored because isUsingTool={isUsingTool}, " +
+                            $"allowWhileFishing={allowWhileFishing}, Tool={player.CurrentTool?.Name ?? "null"}, " +
+                            $"Menu={Game1.activeClickableMenu?.GetType().FullName ?? "null"}"
+                        );
                     }
 
                     IsHotkeyHeld[i] = true;
                 }
 
-                // Hotkey just released
                 if (!isHotkeyPressed && IsHotkeyHeld[i])
                 {
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    EndForcedLeftClick();
 
                     Item currentItem = player.Items[player.CurrentToolIndex];
                     if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
                     {
-                        mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                        EndForcedRightClick();
                     }
+
+                    LogDebug(
+                        $"Hotkey {i + 1} released. Tool={player.CurrentTool?.Name ?? "null"} Item={currentItem?.Name ?? "null"}"
+                    );
 
                     IsHotkeyHeld[i] = false;
                 }
             }
         }
 
-        private void AppliesSmartCastLinux()
+        private void BeginForcedLeftClick()
         {
-            // Do nothing if player is in a menu like Generic Mod Config Menu
-            if (Game1.activeClickableMenu != null)
-                return;
-
-            Farmer player = Game1.player;
-
-            for (int i = 0; i < 12; i++)
-            {
-                if (Config.Hotkeys[i] == null || Config.Hotkeys[i].Keybinds.Count() == 0)
-                    continue;
-
-                bool isHotkeyPressed = Config.Hotkeys[i].IsDown();
-
-                // Prevent multiple hotkeys at once
-                for (int j = 0; j < 12; j++)
-                {
-                    if (i != j && NeedToSwitchBack[j])
-                    {
-                        isHotkeyPressed = false;
-                        break;
-                    }
-                }
-
-                // Hotkey just pressed
-                if (isHotkeyPressed && !IsHotkeyHeld[i])
-                {
-                    if (!isUsingTool)
-                    {
-                        isUsingTool = true;
-
-                        if (!NeedToSwitchBack[i])
-                        {
-                            originalToolIndex = player.CurrentToolIndex;
-                            player.CurrentToolIndex = Config.HotkeyToolIndexes[i] - 1;
-                        }
-                        DebugLog($"Hotkey {i + 1} pressed. Applying tool at slot {Config.HotkeyToolIndexes[i]}.");
-                        RunXdotool("mousedown 1");
-                        //mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                        NeedToSwitchBack[i] = true;
-
-                        Item currentItem = player.Items[player.CurrentToolIndex];
-                        if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
-                        {
-                            RunXdotool("mousedown 3");
-                            //mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-                        }
-                    }
-
-                    IsHotkeyHeld[i] = true;
-                }
-
-                // Hotkey just released
-                if (!isHotkeyPressed && IsHotkeyHeld[i])
-                {
-                    DebugLog($"Hotkey {i + 1} released. Releasing tool.");
-                    RunXdotool("mouseup 1");
-                    //mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-
-                    Item currentItem = player.Items[player.CurrentToolIndex];
-                    if (currentItem is StardewValley.Object obj && obj.Edibility >= 0)
-                    {
-                        RunXdotool("mouseup 3");
-                        //mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                    }
-
-                    IsHotkeyHeld[i] = false;
-                }
-            }
+            ForceLeftPressFrame = true;
+            ForceLeftHeld = true;
+            ForceLeftReleaseFrame = false;
+            LogDebug("BeginForcedLeftClick()");
         }
 
-        //runs clickevent for linux
-        private void RunXdotool(string args)
+        private void EndForcedLeftClick()
         {
-            DebugLog($"Running xdotool {args}");
-
-            try
-            {
-                var pi = new ProcessStartInfo
-                {
-                    FileName = Path.Combine(Helper.DirectoryPath, "xdotool"),
-                    Arguments = args,
-                    UseShellExecute = false,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-                using var proc = Process.Start(pi)!;
-                proc.WaitForExit();
-                if (proc.ExitCode != 0)
-                    Monitor.Log($"xdotool failed: {proc.StandardError.ReadToEnd()}", LogLevel.Warn);
-            }
-            catch (Exception ex)
-            {
-                Monitor.Log($"Failed to call xdotool: {ex}", LogLevel.Error);
-            }
+            ForceLeftHeld = false;
+            ForceLeftReleaseFrame = true;
+            LogDebug("EndForcedLeftClick()");
         }
 
-        //used to handle logging
-        private void DebugLog(string message)
+        private void BeginForcedRightClick()
         {
-            if (Config.DebugMode)
-                Monitor.Log(message, LogLevel.Info);
+            ForceRightPressFrame = true;
+            ForceRightHeld = true;
+            ForceRightReleaseFrame = false;
+            LogDebug("BeginForcedRightClick()");
         }
 
+        private void EndForcedRightClick()
+        {
+            ForceRightHeld = false;
+            ForceRightReleaseFrame = true;
+            LogDebug("EndForcedRightClick()");
+        }
 
         private void CheckIfDoneUsingTool()
         {
+            if (Game1.activeClickableMenu is StardewValley.Menus.BobberBar)
+            {
+                LogDebug("CheckIfDoneUsingTool deferred because BobberBar is active.");
+                return;
+            }
+
             if (!Game1.player.UsingTool)
             {
                 isUsingTool = false;
 
-                for (int i = 0; i < 12; i++)
+                for (int i = 0; i < HotkeyCount; i++)
                 {
                     if (!IsHotkeyHeld[i] && NeedToSwitchBack[i])
                     {
+                        LogDebug($"Switching back to original slot {originalToolIndex + 1} from slot {Game1.player.CurrentToolIndex + 1}");
                         Game1.player.CurrentToolIndex = originalToolIndex;
                         NeedToSwitchBack[i] = false;
                     }
                 }
             }
+        }
+
+        private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
+        {
+            ForceLeftHeld = false;
+            ForceRightHeld = false;
+            ForceLeftPressFrame = false;
+            ForceLeftReleaseFrame = false;
+            ForceRightPressFrame = false;
+            ForceRightReleaseFrame = false;
+            isUsingTool = false;
+            originalToolIndex = 0;
+
+            for (int i = 0; i < HotkeyCount; i++)
+            {
+                IsHotkeyHeld[i] = false;
+                NeedToSwitchBack[i] = false;
+            }
+
+            LogDebug("Returned to title. Cleared forced mouse state.");
         }
 
         private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
@@ -294,28 +374,7 @@ namespace QuickCastHotkeys
                 save: () => Helper.WriteConfig(Config)
             );
 
-            gmcm.AddTextOption(
-                mod: ModManifest,
-                name: () => "Operating System",
-                tooltip: () => "Choose which Operating System your using to set the type of code to run, may require hard reset after saved changes. " +
-                "Windows setting uses code to mimic click but only works on windows, " +
-                "and Linux (steamdeck) logic option uses the xdotool compiled code to handle mouse clicks in Linux but require permissin to be set by entering in Linux Terminal: \n" +
-                "chmod +x mods/QuickCastHotkeys/xdotool",
-                getValue: () => Config.Mode.ToString(),
-                setValue: value => Config.Mode = Enum.TryParse(value, out SmartCastMode mode) ? mode : SmartCastMode.Windows,
-                allowedValues: Enum.GetNames(typeof(SmartCastMode))
-            );
-
-            gmcm.AddBoolOption(
-                mod: ModManifest,
-                name: () => "Enable Debug Mode Logging",
-                tooltip: () => "If enabled, shows logs about xdotool commands and cast actions.",
-                getValue: () => Config.DebugMode,
-                setValue: value => Config.DebugMode = value
-            );
-
-
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < HotkeyCount; i++)
             {
                 int index = i;
 
@@ -339,11 +398,10 @@ namespace QuickCastHotkeys
             }
         }
 
-
-
-
-
-
-
+        public void LogDebug(string message)
+        {
+            if (Config?.EnableDebugLogging == true)
+                Monitor.Log(message, LogLevel.Debug);
+        }
     }
 }
